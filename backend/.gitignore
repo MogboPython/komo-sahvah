@@ -1,0 +1,13 @@
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env.*
+.env
+
+*.txt
+.dockerignore
+prd.md
+cod/
+bin/
