@@ -1,0 +1,7 @@
+{
+  "variables": {
+    "NODE_ENV": "production",
+    "RAILPACK_PRUNE_DEPS": "true",
+    "RAILPACK_NODE_PRUNE_CMD": "npm prune --omit=dev --ignore-scripts"
+  }
+}

@@ -23,13 +23,17 @@ const (
 
 // Deployment holds all metadata for a single deployment.
 type Deployment struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Status    DeploymentStatus   `bson:"status" json:"status"`
-	SourceDir string             `bson:"source_dir" json:"source_dir"` // absolute path to cloned/extracted source
-	SourceURL string             `bson:"source_url,omitempty" json:"source_url,omitempty"`
-	Error     string             `bson:"error" json:"error,omitempty"`
-	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt time.Time          `bson:"updated_at" json:"updated_at"`
+	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Status      DeploymentStatus   `bson:"status" json:"status"`
+	SourceDir   string             `bson:"source_dir" json:"source_dir"` // absolute path to cloned/extracted source
+	SourceURL   string             `bson:"source_url" json:"source_url,omitempty"`
+	ImageName   string             `bson:"image_name" json:"image_name,omitempty"`     // Docker image produced by railpack
+	ContainerID string             `bson:"container_id" json:"container_id,omitempty"` // short Docker container ID
+	ContainerIP string             `bson:"container_ip" json:"container_ip,omitempty"` // IP on the internal Docker network
+	AppURL      string             `bson:"app_url" json:"app_url,omitempty"`           // publicly routable path via Caddy
+	Error       string             `bson:"error" json:"error,omitempty"`
+	CreatedAt   time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt   time.Time          `bson:"updated_at" json:"updated_at"`
 }
 
 type DeploymentRepository interface {

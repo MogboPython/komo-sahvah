@@ -9,11 +9,20 @@ I got the inspiration from a Fullstack/Infra Engineer job advert put out by [Bri
 ### Backend
 
 - [x] Accept project files and save to temp folder (git urls/zip files)
-- [ ] Railpack to build the app into a container image
-- [ ] Run the container locally via Docker.
-- [ ] Stream build and deploy logs to the UI in real time over SSE
+- [x] Railpack to build the app into a container image
+- [x] Run the container locally via Docker.
+- [x] Stream build and deploy logs to the UI in real time over SSE
 - [ ] Configure Caddy to reverse-proxy a path or hostname to the running container. 
 
 ### Frontend
 - [ ] Interface to submit git url or upload zipped file
 - [ ] Stream build logs from backend
+
+## Challenges Faced & Solutions
+Here is a breakdown of the notable issues encountered during development and how they were resolved.
+
+### 1. Buildkit Error
+* **The Problem:** BUILDKIT_HOST environment variable is not set or running.
+
+### 2. Heavy Images
+* **The Problem:**  Image were too large on the first project I built.

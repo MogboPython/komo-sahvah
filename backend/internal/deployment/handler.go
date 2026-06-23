@@ -10,18 +10,27 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MogboPython/komo-sahvah/backend/internal/logs"
 	"github.com/MogboPython/komo-sahvah/backend/internal/repository"
+	"github.com/MogboPython/komo-sahvah/backend/pkg/common"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type Handler struct {
 	deployRepo repository.DeploymentRepository
+	registry   *logs.Registry
+	pipeline   *Pipeline
 	logger     *slog.Logger
 }
 
-func NewHandler(deployRepo repository.DeploymentRepository, logger *slog.Logger) *Handler {
-	return &Handler{deployRepo: deployRepo, logger: logger}
+func NewHandler(deployRepo repository.DeploymentRepository, registry *logs.Registry, pipeline *Pipeline, logger *slog.Logger) *Handler {
+	return &Handler{
+		deployRepo: deployRepo,
+		registry:   registry,
+		pipeline:   pipeline,
+		logger:     logger,
+	}
 }
 
 type githubRequest struct {
@@ -41,10 +50,8 @@ type errorResponse struct {
 
 const maxMultipartMemory = 32 << 20 // 32 MB buffered in RAM; rest spills to disk
 
-// Create handles both submission paths:
-//
-//   - application/json        { "github_url": "https://github.com/..." }
-//   - multipart/form-data     form field "file" containing a .zip archive
+// - application/json        { "github_url": "https://github.com/..." }
+// - multipart/form-data     form field "file" containing a .zip archive
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
@@ -83,7 +90,7 @@ func (h *Handler) handleGitHub(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "github_url is required", "")
 		return
 	}
-	if !isValidGitURL(req.GithubURL) {
+	if !common.IsValidGitURL(req.GithubURL) {
 		writeError(w, http.StatusBadRequest,
 			"invalid github_url — must be a GitHub, GitLab, or Bitbucket URL",
 			"",
@@ -98,9 +105,9 @@ func (h *Handler) handleGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clone asynchronously so the HTTP response returns the deployment ID immediately.
-	// The client will poll status or stream logs via /api/deploy/:id and /api/deploy/:id/logs.
-	go h.cloneAsync(deployID, req.GithubURL, workDir)
+	go func() {
+		h.cloneAndRun(deployID, req.GithubURL, workDir)
+	}()
 
 	writeJSON(w, http.StatusAccepted, deployResponse{
 		DeploymentID: deployID,
@@ -109,30 +116,18 @@ func (h *Handler) handleGitHub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func isValidGitURL(u string) bool {
-	validPrefixes := []string{
-		"https://github.com/",
-		"https://gitlab.com/",
-		"https://bitbucket.org/",
-		"git@github.com:",
-		"git@gitlab.com:",
-		"git@bitbucket.org:",
-	}
-	for _, p := range validPrefixes {
-		if strings.HasPrefix(u, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// cloneAsync runs git clone in a background goroutine and updates the database
-// when the operation completes or fails.
-func (h *Handler) cloneAsync(deployID, repoURL, workDir string) {
+func (h *Handler) cloneAndRun(deployID, repoURL, workDir string) {
 	log := h.logger.With("deployment_id", deployID, "repo", repoURL)
-	log.Info("starting git clone")
 
-	// TODO: catch error
+	bc, ok := h.registry.Get(deployID)
+	if !ok {
+		log.Error("broadcaster missing at clone start")
+		return
+	}
+
+	bc.Systemf("=== cloning repository ===")
+	bc.Systemf("url: %s", repoURL)
+
 	h.deployRepo.Update(deployID, map[string]any{
 		"status": repository.StatusCloning,
 	})
@@ -141,28 +136,44 @@ func (h *Handler) cloneAsync(deployID, repoURL, workDir string) {
 	if err != nil {
 		var inaccessible *ErrRepoInaccessible
 		if errors.As(err, &inaccessible) {
+			msg := inaccessible.Detail +
+				"\n\nTo fix this: make the repository public, or add our deploy key " +
+				"in GitHub → Settings → Deploy keys → Add deploy key."
+
 			log.Warn("repository inaccessible", "detail", inaccessible.Detail)
+
 			h.deployRepo.Update(deployID, map[string]any{
 				"status": repository.StatusFailed,
-				"error": inaccessible.Detail +
-					"\n\nTo fix this: make the repository public, or add our deploy key " +
-					"in GitHub → Settings → Deploy keys → Add deploy key.",
+				"error":  msg,
 			})
+
+			bc.Systemf("ERROR: %s", msg)
+			bc.Close(logs.DoneEvent{Status: "failed", Error: msg})
+
 			return
 		}
 
 		log.Error("git clone failed", "error", err)
+		msg := err.Error()
 		h.deployRepo.Update(deployID, map[string]any{
 			"status": repository.StatusFailed,
-			"error":  err.Error(),
+			"error":  msg,
 		})
+
+		bc.Systemf("ERROR: git clone failed: %s", msg)
+		bc.Close(logs.DoneEvent{Status: "failed", Error: msg})
+
 		return
 	}
 
-	log.Info("repository cloned successfully")
+	bc.Systemf("=== repository cloned successfully ===")
+	log.Info("clone complete, starting pipeline")
+
 	h.deployRepo.Update(deployID, map[string]any{
 		"status": repository.StatusPending,
 	})
+
+	h.pipeline.Run(deployID)
 }
 
 func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -170,6 +181,8 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "could not parse multipart form", "")
 		return
 	}
+
+	// TODO: instead of loading the entire file into memory, stream it to a temporary file and then extract it.
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -196,17 +209,27 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bc, _ := h.registry.Get(deployID)
+	bc.Systemf("=== extracting uploaded archive ===")
+	bc.Systemf("filename: %s", header.Filename)
+
 	if err := ExtractZip(file, workDir); err != nil {
 		h.logger.Error("zip extraction failed", "deployment_id", deployID, "error", err)
 		h.deployRepo.Update(deployID, map[string]any{
 			"status": repository.StatusFailed,
 			"error":  err.Error(),
 		})
+
+		bc.Systemf("ERROR: %s", err)
+		bc.Close(logs.DoneEvent{Status: "failed", Error: err.Error()})
+
 		writeError(w, http.StatusBadRequest, "failed to extract zip archive: "+err.Error(), "")
 		return
 	}
 
+	bc.Systemf("=== zip extracted successfully ===")
 	h.logger.Info("zip extracted", "deployment_id", deployID, "filename", header.Filename)
+
 	h.deployRepo.Update(deployID, map[string]any{
 		"status": repository.StatusPending,
 	})
@@ -214,14 +237,17 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, deployResponse{
 		DeploymentID: deployID,
 		Status:       string(repository.StatusPending),
-		Message:      "deployment created — source extracted and ready to build",
+		Message:      "deployment created — source extracted, build starting",
 	})
+
+	go h.pipeline.Run(deployID)
 }
 
-func (h *Handler) initDeployment(sourceURL string) (string, string, error) {
+func (h *Handler) initDeployment(sourceURL string) (id, workDir string, err error) {
 	objID := primitive.NewObjectID()
+	id = objID.Hex()
 
-	workDir, err := PrepareWorkDir(objID.Hex())
+	workDir, err = PrepareWorkDir(id)
 	if err != nil {
 		return "", "", err
 	}
@@ -238,17 +264,18 @@ func (h *Handler) initDeployment(sourceURL string) (string, string, error) {
 		return "", "", err
 	}
 
-	return objID.Hex(), workDir, nil
+	h.registry.Create(id)
+
+	return id, workDir, nil
 }
 
-// GetStatus returns the current state of a deployment.
 func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
 		return
 	}
 
-	id := deployIDFromPath(r.URL.Path)
+	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "deployment id is required", "")
 		return
@@ -267,16 +294,81 @@ func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, *d)
 }
 
-func deployIDFromPath(path string) string {
-	const prefix = "/api/deploy/"
-	if !strings.HasPrefix(path, prefix) {
-		return ""
+// SSE event format:
+//
+//	event: log
+//	data: {"text":"...","stream":"stdout","time":"..."}
+//
+//	event: done
+//	data: {"status":"running"}  (or {"status":"failed","error":"..."})
+func (h *Handler) StreamLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
 	}
-	rest := strings.TrimPrefix(path, prefix)
-	if before, _, ok := strings.Cut(rest, "/"); ok {
-		return before
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "deployment id is required", "")
+		return
 	}
-	return rest
+
+	bc, ok := h.registry.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("deployment %q not found", id), "")
+		return
+	}
+
+	d, err := h.deployRepo.GetByID(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get deployment", err.Error())
+		return
+	}
+	if d == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("deployment %q not found", id), "")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported by this server", "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disables Nginx/Caddy buffering
+
+	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
+	lineCh, doneCh := bc.Subscribe(r.Context(), 0)
+
+	enc := json.NewEncoder(w)
+
+	for {
+		select {
+		case line, open := <-lineCh:
+			if !open {
+				continue
+			}
+			fmt.Fprintf(w, "event: log\ndata: ")
+			_ = enc.Encode(line)
+			fmt.Fprintf(w, "\n")
+			flusher.Flush()
+
+		case doneEvt := <-doneCh:
+			fmt.Fprintf(w, "event: done\ndata: ")
+			_ = enc.Encode(doneEvt)
+			fmt.Fprintf(w, "\n")
+			flusher.Flush()
+			return
+
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

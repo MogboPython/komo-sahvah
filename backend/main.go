@@ -14,6 +14,7 @@ import (
 
 	"github.com/MogboPython/komo-sahvah/backend/internal/config"
 	"github.com/MogboPython/komo-sahvah/backend/internal/deployment"
+	"github.com/MogboPython/komo-sahvah/backend/internal/logs"
 	"github.com/MogboPython/komo-sahvah/backend/internal/repository"
 )
 
@@ -29,10 +30,12 @@ func main() {
 	logger.Info("connected to MongoDB", "database", config.MongoDB.Name())
 
 	deployRepo := repository.NewDeploymentRepository(config.MongoDB)
-	deployHandler := deployment.NewHandler(deployRepo, logger)
+	registry := logs.NewRegistry()
+	pipeline := deployment.NewPipeline(deployRepo, registry, logger)
+	handler := deployment.NewHandler(deployRepo, registry, pipeline, logger)
 
 	mux := http.NewServeMux()
-	registerRoutes(mux, deployHandler)
+	registerRoutes(mux, handler)
 
 	port := config.GetEnvOrDefault("PORT", "8080")
 	srv := &http.Server{
@@ -84,22 +87,24 @@ func main() {
 //	GET    /api/healthz        → liveness probe
 func registerRoutes(mux *http.ServeMux, h *deployment.Handler) {
 	mux.HandleFunc("/api/deploy", h.Create)
-	mux.HandleFunc("/api/deploy/", func(w http.ResponseWriter, r *http.Request) {
-		// TODO: Route sub-paths: /api/deploy/{id}  and  /api/deploy/{id}/logs
-		if isLogsPath(r.URL.Path) {
-			// Placeholder — wired up in the next step when I add SSE.
-			http.Error(w, "log streaming not yet implemented", http.StatusNotImplemented)
-			return
-		}
-		h.GetStatus(w, r)
-	})
+	mux.HandleFunc("/api/deploy/{id}", h.GetStatus)
+	mux.HandleFunc("/api/deploy/{id}/logs", h.StreamLogs)
+	// mux.HandleFunc("/api/deploy/", func(w http.ResponseWriter, r *http.Request) {
+	// TODO: Route sub-paths: /api/deploy/{id}  and  /api/deploy/{id}/logs
+	// 	if isLogsPath(r.URL.Path) {
+	// 		h.StreamLogs(w, r)
+	// 		return
+	// 	}
+	// 	h.GetStatus(w, r)
+	// })
 	mux.HandleFunc("/api/healthcheck", healthcheck)
 }
 
-func isLogsPath(path string) bool {
-	const suffix = "/logs"
-	return len(path) > len(suffix) && path[len(path)-len(suffix):] == suffix
-}
+// TODO: remove
+// func isLogsPath(path string) bool {
+// 	const suffix = "/logs"
+// 	return len(path) > len(suffix) && path[len(path)-len(suffix):] == suffix
+// }
 
 func healthcheck(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
