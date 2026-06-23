@@ -11,3 +11,5 @@ go.work.sum
 prd.md
 cod/
 bin/
+internal/build/railpack_config_test.go
+temp-fant-website/

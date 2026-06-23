@@ -29,6 +29,7 @@ func RunRailpack(ctx context.Context, sourceDir, imageName string, bc *logs.Broa
 	bc.Systemf("image:  %s", imageName)
 
 	// railpack build --name <image> <path>
+	// TODO: put images in a more permanent location.
 	cmd := exec.CommandContext(buildCtx, "railpack", "build",
 		"--name", imageName,
 		sourceDir,
