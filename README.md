@@ -12,6 +12,8 @@ I got the inspiration from a Fullstack/Infra Engineer job advert put out by [Bri
 - [x] Railpack to build the app into a container image
 - [x] Run the container locally via Docker.
 - [x] Stream build and deploy logs to the UI in real time over SSE
+- [x] Integration test for railpack
+- [ ] Integration test for docker
 - [ ] Configure Caddy to reverse-proxy a path or hostname to the running container. 
 
 ### Frontend
