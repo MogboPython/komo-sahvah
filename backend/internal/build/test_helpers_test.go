@@ -84,35 +84,3 @@ func hasLineWithStream(lines []logs.Line, stream logs.Stream) bool {
 	}
 	return false
 }
-
-func repoRoot(t *testing.T) string {
-	t.Helper()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	return filepath.Join(wd, "..", "..")
-}
-
-func tempFantWebsiteDir(t *testing.T) string {
-	t.Helper()
-
-	dir := filepath.Join(repoRoot(t), "temp-fant-website")
-	if _, err := os.Stat(dir); err != nil {
-		t.Skipf("temp-fant-website not available: %v", err)
-	}
-	return dir
-}
-
-func copyFile(t *testing.T, src, dst string) {
-	t.Helper()
-
-	data, err := os.ReadFile(src)
-	if err != nil {
-		t.Fatalf("ReadFile(%q): %v", src, err)
-	}
-	if err := os.WriteFile(dst, data, 0o644); err != nil {
-		t.Fatalf("WriteFile(%q): %v", dst, err)
-	}
-}
